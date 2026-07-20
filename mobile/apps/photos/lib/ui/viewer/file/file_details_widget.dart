@@ -233,44 +233,40 @@ class _FileDetailsWidgetState extends State<FileDetailsWidget> {
 
     if (_isImage) {
       sections.add(
-        ValueListenableBuilder(
-          valueListenable: _exifNotifier,
-          builder: (context, _, _) => MenuGroupComponent(
-            items: [
-              if (hasPreview)
-                PreviewPropertiesItemWidget(
-                  file,
-                  _isImage,
-                  _exifData,
-                  _currentUserID,
-                ),
-              AllExifItemWidget(file, _exifNotifier.value),
-            ],
-          ),
+        MenuGroupComponent(
+          items: [
+            if (hasPreview)
+              PreviewPropertiesItemWidget(
+                file,
+                _isImage,
+                _exifData,
+                _currentUserID,
+              ),
+            ValueListenableBuilder<Map<String, IfdTag>?>(
+              valueListenable: _exifNotifier,
+              builder: (context, exif, _) => AllExifItemWidget(file, exif),
+            ),
+          ],
         ),
       );
     } else if (file.isVideo) {
-      sections.add(
-        ValueListenableBuilder(
-          valueListenable: _videoMetadataNotifier,
-          builder: (context, value, _) {
-            final items = <Widget>[
-              if (hasPreview)
-                PreviewPropertiesItemWidget(
-                  file,
-                  _isImage,
-                  _exifData,
-                  _currentUserID,
-                ),
-              if (flagService.internalUser) VideoExifRowItem(file, value),
-            ];
-            if (items.isEmpty) {
-              return const SizedBox.shrink();
-            }
-            return MenuGroupComponent(items: items);
-          },
-        ),
-      );
+      final items = <Widget>[
+        if (hasPreview)
+          PreviewPropertiesItemWidget(
+            file,
+            _isImage,
+            _exifData,
+            _currentUserID,
+          ),
+        if (flagService.internalUser)
+          ValueListenableBuilder<FFProbeProps?>(
+            valueListenable: _videoMetadataNotifier,
+            builder: (context, value, _) => VideoExifRowItem(file, value),
+          ),
+      ];
+      if (items.isNotEmpty) {
+        sections.add(MenuGroupComponent(items: items));
+      }
     }
 
     final scrollSections = <Widget>[
