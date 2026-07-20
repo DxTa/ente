@@ -7,8 +7,10 @@ import "package:photos/models/ffmpeg/ffprobe_props.dart";
 import 'package:photos/models/file/file.dart';
 import "package:photos/models/file/file_type.dart";
 import "package:photos/services/video_preview_service.dart";
+import "package:photos/ui/common/loading_widget.dart";
+import "package:photos/ui/components/info_item_widget.dart";
 
-class PreviewPropertiesItemWidget extends StatefulWidget {
+class PreviewPropertiesItemWidget extends StatelessWidget {
   final EnteFile file;
   final bool isImage;
   final Map<String, dynamic> exifData;
@@ -20,24 +22,25 @@ class PreviewPropertiesItemWidget extends StatefulWidget {
     this.currentUserID, {
     super.key,
   });
-  @override
-  State<PreviewPropertiesItemWidget> createState() =>
-      _PreviewPropertiesItemWidgetState();
-}
-
-class _PreviewPropertiesItemWidgetState
-    extends State<PreviewPropertiesItemWidget> {
-  String? _subtitle;
-
-  @override
-  void initState() {
-    super.initState();
-    Future.microtask(() => _getSection());
-  }
 
   @override
   Widget build(BuildContext context) {
-    if (_subtitle == null) return const SizedBox();
+    return InfoItemWidget<String?>(
+      key: ValueKey("preview-properties-${file.tag}"),
+      load: _loadSubtitle,
+      placeholder: _menuItem(context, isLoading: true),
+      errorBuilder: (context, error, stackTrace) => const SizedBox.shrink(),
+      builder: (context, subtitle) => subtitle == null
+          ? const SizedBox.shrink()
+          : _menuItem(context, subtitle: subtitle),
+    );
+  }
+
+  Widget _menuItem(
+    BuildContext context, {
+    String? subtitle,
+    bool isLoading = false,
+  }) {
     final colors = context.componentColors;
     return MenuComponent(
       key: const ValueKey("Stream properties"),
@@ -47,49 +50,47 @@ class _PreviewPropertiesItemWidgetState
         color: colors.textLight,
       ),
       title: AppLocalizations.of(context).streamDetails,
-      subtitle: _subtitle,
+      subtitle: subtitle ?? (isLoading ? "…" : null),
+      trailing: isLoading
+          ? const EnteLoadingWidget(size: IconSizes.small, padding: 0)
+          : null,
     );
   }
 
-  Future<void> _getSection() async {
-    if (!mounted) return;
-
+  Future<String?> _loadSubtitle() async {
+    final file = this.file;
     final parts = <String>[];
-
-    final data = await VideoPreviewService.instance
-        .getPlaylist(widget.file)
-        .onError((error, stackTrace) {
+    try {
+      final data = await VideoPreviewService.instance.getPlaylist(file).onError(
+        (error, stackTrace) {
           return null;
-        });
-    if (data == null) return;
-
-    if (!mounted) return;
-
-    if (data.width != null && data.height != null) {
-      parts.add("${data.width!}x${data.height!}");
-    }
-
-    if (data.size != null) {
-      parts.add(formatBytes(data.size!));
-    }
-
-    if ((widget.file.fileType == FileType.video) &&
-        (widget.file.localID != null || widget.file.duration != 0) &&
-        data.size != null) {
-      final result = FFProbeProps.formatBitrate(
-        data.size! * 8 / widget.file.duration!,
-        "b/s",
+        },
       );
-      if (result != null) {
-        parts.add(result);
+
+      if (data != null) {
+        if (data.width != null && data.height != null) {
+          parts.add("${data.width!}x${data.height!}");
+        }
+
+        if (data.size != null) {
+          parts.add(formatBytes(data.size!));
+        }
+
+        if ((file.fileType == FileType.video) &&
+            (file.localID != null || file.duration != 0) &&
+            data.size != null) {
+          final result = FFProbeProps.formatBitrate(
+            data.size! * 8 / file.duration!,
+            "b/s",
+          );
+          if (result != null) {
+            parts.add(result);
+          }
+        }
       }
+    } catch (_) {
+      parts.clear();
     }
-
-    if (parts.isEmpty) return;
-
-    _subtitle = parts.join("   ");
-    if (mounted) {
-      setState(() {});
-    }
+    return parts.isEmpty ? null : parts.join("   ");
   }
 }
