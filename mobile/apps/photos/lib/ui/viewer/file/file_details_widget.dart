@@ -79,7 +79,6 @@ class _FileDetailsWidgetState extends State<FileDetailsWidget> {
 
   @override
   void initState() {
-    debugPrint('file_details_sheet initState');
     _currentUserID = Configuration.instance.getUserIDV2();
     hasLocationData.value = widget.file.hasLocation;
     _isImage =
@@ -181,20 +180,31 @@ class _FileDetailsWidgetState extends State<FileDetailsWidget> {
                     ? FileCaptionWidget(file: file)
                     : FileCaptionReadyOnly(caption: file.caption!),
               ),
-            ValueListenableBuilder(
-              valueListenable: _exifNotifier,
-              builder: (context, _, _) => MenuGroupComponent(
-                items: [
-                  FilePropertiesItemWidget(
+            MenuGroupComponent(
+              items: [
+                ValueListenableBuilder<Map<String, IfdTag>?>(
+                  valueListenable: _exifNotifier,
+                  builder: (context, _, _) => FilePropertiesItemWidget(
                     file,
                     _isImage,
                     _exifData,
                     _currentUserID,
                   ),
-                  CreationTimeItem(file, _currentUserID),
-                  if (showExifListTile) BasicExifItemWidget(_exifData),
-                ],
-              ),
+                ),
+                CreationTimeItem(file, _currentUserID),
+                if (_isImage)
+                  ValueListenableBuilder<Map<String, IfdTag>?>(
+                    valueListenable: _exifNotifier,
+                    builder: (context, exif, _) {
+                      if (exif == null) {
+                        return const BasicExifItemWidget.loading();
+                      }
+                      return showExifListTile
+                          ? BasicExifItemWidget(_exifData)
+                          : const SizedBox.shrink();
+                    },
+                  ),
+              ],
             ),
           ],
         ),
