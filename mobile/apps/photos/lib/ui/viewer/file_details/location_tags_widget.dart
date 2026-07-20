@@ -69,27 +69,33 @@ class _LocationTagsWidgetState extends State<LocationTagsWidget> {
           future: locationTagChips,
           builder: (context, snapshot) {
             final placeChips = snapshot.data ?? const <Widget>[];
-            return Wrap(
-              spacing: Spacing.sm,
-              runSpacing: Spacing.sm,
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
               children: [
-                ...placeChips,
-                IconButtonComponent(
-                  icon: HugeIcon(
-                    icon: HugeIcons.strokeRoundedPlusSign,
-                    size: IconSizes.small,
-                    color: colors.textBase,
-                  ),
-                  variant: IconButtonComponentVariant.circular,
-                  shouldSurfaceExecutionStates: false,
-                  onTap: () =>
-                      showAddLocationSheet(context, widget.file.location!),
+                Wrap(
+                  spacing: Spacing.sm,
+                  runSpacing: Spacing.sm,
+                  children: [
+                    ...placeChips,
+                    IconButtonComponent(
+                      icon: HugeIcon(
+                        icon: HugeIcons.strokeRoundedPlusSign,
+                        size: IconSizes.small,
+                        color: colors.textBase,
+                      ),
+                      variant: IconButtonComponentVariant.circular,
+                      shouldSurfaceExecutionStates: false,
+                      onTap: () =>
+                          showAddLocationSheet(context, widget.file.location!),
+                    ),
+                  ],
                 ),
+                if (snapshot.hasData) InfoMap(widget.file),
               ],
             );
           },
         ),
-        InfoMap(widget.file),
       ],
     );
   }

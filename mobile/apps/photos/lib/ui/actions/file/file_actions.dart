@@ -111,9 +111,9 @@ Future<void> showDetailsSheet(BuildContext context, EnteFile file) async {
       opened: true,
     ),
   );
-  await showBottomSheetComponent(
+  await showBottomSheetComponent<void>(
     context: context,
-    builder: (_) => FileDetailsWidget(file),
+    builder: (_) => _DraggableDetailsSheet(file: file),
   );
   Bus.instance.fire(
     DetailsSheetEvent(
@@ -122,4 +122,59 @@ Future<void> showDetailsSheet(BuildContext context, EnteFile file) async {
       opened: false,
     ),
   );
+}
+
+class _DraggableDetailsSheet extends StatefulWidget {
+  const _DraggableDetailsSheet({required this.file});
+
+  final EnteFile file;
+
+  @override
+  State<_DraggableDetailsSheet> createState() => _DraggableDetailsSheetState();
+}
+
+class _DraggableDetailsSheetState extends State<_DraggableDetailsSheet> {
+  final _sheetController = DraggableScrollableController();
+  bool _isExpanded = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _sheetController.addListener(_onSheetSizeChanged);
+  }
+
+  @override
+  void dispose() {
+    _sheetController.removeListener(_onSheetSizeChanged);
+    _sheetController.dispose();
+    super.dispose();
+  }
+
+  void _onSheetSizeChanged() {
+    final isNowExpanded = _sheetController.size >= 0.75;
+    if (isNowExpanded == _isExpanded) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || isNowExpanded == _isExpanded) return;
+      setState(() {
+        _isExpanded = isNowExpanded;
+      });
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isKeyboardOpen = MediaQuery.viewInsetsOf(context).bottom > 60;
+    final disableSnap = isKeyboardOpen || _isExpanded;
+    return DraggableScrollableSheet(
+      controller: _sheetController,
+      initialChildSize: disableSnap ? 0.95 : 0.75,
+      minChildSize: disableSnap ? 0.75 : 0.5,
+      maxChildSize: 0.95,
+      snap: !disableSnap,
+      snapSizes: disableSnap ? null : const [0.75],
+      expand: false,
+      builder: (context, scrollController) =>
+          FileDetailsWidget(widget.file, scrollController: scrollController),
+    );
+  }
 }

@@ -6,6 +6,7 @@ import "package:ente_components/ente_components.dart";
 import "package:exif_reader/exif_reader.dart";
 import "package:flutter/foundation.dart";
 import "package:flutter/material.dart";
+import "package:hugeicons/hugeicons.dart";
 import "package:logging/logging.dart";
 import "package:photos/core/configuration.dart";
 import "package:photos/core/event_bus.dart";
@@ -37,8 +38,13 @@ import "package:photos/ui/viewer/file_details/video_exif_item.dart";
 
 class FileDetailsWidget extends StatefulWidget {
   final EnteFile file;
+  final ScrollController scrollController;
 
-  const FileDetailsWidget(this.file, {super.key});
+  const FileDetailsWidget(
+    this.file, {
+    required this.scrollController,
+    super.key,
+  });
 
   @override
   State<FileDetailsWidget> createState() => _FileDetailsWidgetState();
@@ -148,6 +154,7 @@ class _FileDetailsWidgetState extends State<FileDetailsWidget> {
   Widget build(BuildContext context) {
     final file = widget.file;
     final l10n = AppLocalizations.of(context);
+    final colors = context.componentColors;
     final bool isFileOwner =
         file.ownerID == null || file.ownerID == _currentUserID;
     final bool canEditCaption = isFileOwner && !file.isTrash;
@@ -162,21 +169,21 @@ class _FileDetailsWidgetState extends State<FileDetailsWidget> {
 
     sections.add(
       _sectionPadding(
-        ValueListenableBuilder(
-          valueListenable: _exifNotifier,
-          builder: (context, _, _) => Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              AddedByWidget(file),
-              if (showCaption)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: Spacing.lg),
-                  child: canEditCaption
-                      ? FileCaptionWidget(file: file)
-                      : FileCaptionReadyOnly(caption: file.caption!),
-                ),
-              MenuGroupComponent(
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            AddedByWidget(file),
+            if (showCaption)
+              Padding(
+                padding: const EdgeInsets.only(bottom: Spacing.lg),
+                child: canEditCaption
+                    ? FileCaptionWidget(file: file)
+                    : FileCaptionReadyOnly(caption: file.caption!),
+              ),
+            ValueListenableBuilder(
+              valueListenable: _exifNotifier,
+              builder: (context, _, _) => MenuGroupComponent(
                 items: [
                   FilePropertiesItemWidget(
                     file,
@@ -188,8 +195,8 @@ class _FileDetailsWidgetState extends State<FileDetailsWidget> {
                   if (showExifListTile) BasicExifItemWidget(_exifData),
                 ],
               ),
-            ],
-          ),
+            ),
+          ],
         ),
       ),
     );
@@ -256,17 +263,38 @@ class _FileDetailsWidgetState extends State<FileDetailsWidget> {
       );
     }
 
-    return BottomSheetComponent(
-      title: l10n.details,
-      isKeyboardAware: true,
-      isScrollable: true,
-      snap: true,
-      initialChildSize: 0.75,
-      snapSizes: const [0.5, 0.75, 0.95],
-      content: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: sections,
+    final scrollSections = <Widget>[
+      _FileDetailsHeader(title: l10n.details, closeTooltip: l10n.close),
+      const SizedBox(height: Spacing.lg),
+      ...sections,
+    ];
+
+    return Container(
+      clipBehavior: Clip.antiAlias,
+      decoration: BoxDecoration(
+        color: colors.backgroundBase,
+        borderRadius: const BorderRadius.only(
+          topLeft: Radius.circular(Radii.bottomSheet),
+          topRight: Radius.circular(Radii.bottomSheet),
+        ),
+      ),
+      child: SafeArea(
+        top: false,
+        child: CustomScrollView(
+          controller: widget.scrollController,
+          physics: const ClampingScrollPhysics(),
+          slivers: [
+            SliverPadding(
+              padding: const EdgeInsets.all(Spacing.xl),
+              sliver: SliverList(
+                delegate: SliverChildBuilderDelegate(
+                  (context, index) => scrollSections[index],
+                  childCount: scrollSections.length,
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -400,5 +428,44 @@ class _FileDetailsWidgetState extends State<FileDetailsWidget> {
       }
     }
     return null;
+  }
+}
+
+class _FileDetailsHeader extends StatelessWidget {
+  const _FileDetailsHeader({required this.title, required this.closeTooltip});
+
+  final String title;
+  final String closeTooltip;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.componentColors;
+    return SizedBox(
+      height: 38,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          Expanded(
+            child: Text(
+              title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyles.h2.copyWith(color: colors.textBase),
+            ),
+          ),
+          const SizedBox(width: Spacing.md),
+          IconButtonComponent(
+            tooltip: closeTooltip,
+            variant: IconButtonComponentVariant.circular,
+            shouldSurfaceExecutionStates: false,
+            icon: const HugeIcon(
+              icon: HugeIcons.strokeRoundedCancel01,
+              size: IconSizes.small,
+            ),
+            onTap: () => Navigator.of(context).pop(),
+          ),
+        ],
+      ),
+    );
   }
 }
