@@ -4,28 +4,34 @@ import "package:flutter/material.dart";
 import "package:hugeicons/hugeicons.dart";
 import "package:photos/generated/l10n.dart";
 import 'package:photos/models/file/file.dart';
+import "package:photos/ui/common/loading_widget.dart";
 import "package:photos/ui/notification/toast.dart";
 import "package:photos/ui/viewer/file/exif_info_dialog.dart";
 
 class BasicExifItemWidget extends StatelessWidget {
-  final Map<String, dynamic> exifData;
+  final Map<String, dynamic>? exifData;
   const BasicExifItemWidget(this.exifData, {super.key});
+  const BasicExifItemWidget.loading({super.key}) : exifData = null;
 
   @override
   Widget build(BuildContext context) {
     final colors = context.componentColors;
+    final l10n = AppLocalizations.of(context);
+    final exifData = this.exifData;
     final parts = <String>[];
-    if (exifData["fNumber"] != null) {
-      parts.add('ƒ/${exifData["fNumber"]}');
-    }
-    if (exifData["exposureTime"] != null) {
-      parts.add(exifData["exposureTime"].toString());
-    }
-    if (exifData["focalLength"] != null) {
-      parts.add('${exifData["focalLength"]}mm');
-    }
-    if (exifData["ISO"] != null) {
-      parts.add('ISO${exifData["ISO"]}');
+    if (exifData != null) {
+      if (exifData["fNumber"] != null) {
+        parts.add('ƒ/${exifData["fNumber"]}');
+      }
+      if (exifData["exposureTime"] != null) {
+        parts.add(exifData["exposureTime"].toString());
+      }
+      if (exifData["focalLength"] != null) {
+        parts.add('${exifData["focalLength"]}mm');
+      }
+      if (exifData["ISO"] != null) {
+        parts.add('ISO${exifData["ISO"]}');
+      }
     }
     return MenuComponent(
       key: const ValueKey("Basic EXIF"),
@@ -34,8 +40,15 @@ class BasicExifItemWidget extends StatelessWidget {
         size: IconSizes.small,
         color: colors.textLight,
       ),
-      title: exifData["takenOnDevice"] ?? "--",
-      subtitle: parts.isEmpty ? null : parts.join("   "),
+      title: exifData?["takenOnDevice"] ?? "--",
+      subtitle: exifData == null
+          ? l10n.loadingExifData
+          : parts.isEmpty
+          ? null
+          : parts.join("   "),
+      trailing: exifData == null
+          ? const EnteLoadingWidget(size: IconSizes.small, padding: 0)
+          : null,
     );
   }
 }
@@ -56,10 +69,8 @@ class AllExifItemWidget extends StatelessWidget {
       onTap = null;
     } else if (exif!.isNotEmpty) {
       subtitle = l10n.viewAllExifData;
-      onTap = () => showBottomSheetComponent(
-        context: context,
-        builder: (context) => ExifInfoDialog(file),
-      );
+      onTap = () =>
+          showExifInfoSheet(context: context, file: file, exif: exif!);
     } else {
       subtitle = l10n.noExifData;
       onTap = () => showShortToast(context, l10n.thisImageHasNoExifData);
