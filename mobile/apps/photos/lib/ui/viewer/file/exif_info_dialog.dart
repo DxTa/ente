@@ -89,8 +89,21 @@ class ExifInfoDialog extends StatelessWidget {
   Widget build(BuildContext context) {
     final colors = context.componentColors;
     final l10n = AppLocalizations.of(context);
-    final entries = exif.entries.toList(growable: false);
-    final exifRowCount = entries.isEmpty ? 1 : entries.length;
+    final exifText = exif.isEmpty
+        ? l10n.noExifData
+        : exif.entries
+              .map((entry) => "${entry.key}: ${entry.value}")
+              .join("\n");
+    final scrollSections = <Widget>[
+      _ExifInfoHeader(title: l10n.exif, closeTooltip: l10n.close),
+      const SizedBox(height: Spacing.lg),
+      Text(
+        file.title!,
+        style: TextStyles.body.copyWith(color: colors.textLight),
+      ),
+      const SizedBox(height: Spacing.lg),
+      Text(exifText, style: TextStyles.body.copyWith(color: colors.textLight)),
+    ];
 
     return Container(
       clipBehavior: Clip.antiAlias,
@@ -110,33 +123,10 @@ class ExifInfoDialog extends StatelessWidget {
             SliverPadding(
               padding: const EdgeInsets.all(Spacing.xl),
               sliver: SliverList(
-                delegate: SliverChildBuilderDelegate((context, index) {
-                  if (index == 0) {
-                    return _ExifInfoHeader(
-                      title: l10n.exif,
-                      closeTooltip: l10n.close,
-                    );
-                  }
-                  if (index == 1 || index == 3) {
-                    return const SizedBox(height: Spacing.lg);
-                  }
-                  if (index == 2) {
-                    return Text(
-                      file.title!,
-                      style: TextStyles.body.copyWith(color: colors.textLight),
-                    );
-                  }
-
-                  final exifIndex = index - 4;
-                  final text = entries.isEmpty
-                      ? l10n.noExifData
-                      : "${entries[exifIndex].key}: "
-                            "${entries[exifIndex].value}";
-                  return Text(
-                    text,
-                    style: TextStyles.body.copyWith(color: colors.textLight),
-                  );
-                }, childCount: 4 + exifRowCount),
+                delegate: SliverChildBuilderDelegate(
+                  (context, index) => scrollSections[index],
+                  childCount: scrollSections.length,
+                ),
               ),
             ),
           ],
