@@ -752,7 +752,6 @@ export const FileList: React.FC<FileListProps> = ({
     const handleScroll = useCallback(
         ({ scrollOffset }: { scrollOffset: number }) => {
             onScroll?.(scrollOffset);
-
             setShowBackToTop(scrollOffset > 500);
 
             if (onVisibleDateChange && items.length > 0) {

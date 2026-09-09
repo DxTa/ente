@@ -34,10 +34,16 @@ export const computeAllCollectionFilesFromSaved = async () =>
 export const computeNormalCollectionFilesFromSaved = async (
     currentUserID?: number,
 ) => {
+    const collectionFiles = await savedCollectionFiles();
+    return filterNormalCollectionFiles(collectionFiles, currentUserID);
+};
+
+const filterNormalCollectionFiles = async (
+    collectionFiles: EnteFile[],
+    currentUserID?: number,
+) => {
     const hiddenCollections = await savedHiddenCollections(currentUserID);
     const hiddenCollectionIDs = new Set(hiddenCollections.map((c) => c.id));
-
-    const collectionFiles = await savedCollectionFiles();
     const hiddenFileIDs = new Set(
         collectionFiles
             .filter((f) => hiddenCollectionIDs.has(f.collectionID))

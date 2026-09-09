@@ -29,10 +29,13 @@ import {
 import UploadService, {
     areLivePhotoAssets,
     isUploadCancelledError,
+    settleUploadWorkers,
+    shouldReloadExistingFilesForUpload,
     storageLimitExceededErrorMessage,
     upload,
     uploadCancelledErrorMessage,
     uploadItemFileName,
+    type ExistingFileFinder,
     type PotentialLivePhotoAsset,
     type UploadAsset,
 } from "ente-gallery/services/upload/upload-service";
@@ -41,13 +44,23 @@ import type { Collection } from "ente-media/collection";
 import type { EnteFile } from "ente-media/file";
 import {
     fileCreationTime,
+    fileFileName,
     fileLocation,
+    metadataHash,
+    type FileMetadata,
     type ParsedMetadata,
 } from "ente-media/file-metadata";
 import { FileType } from "ente-media/file-type";
 import { potentialFileTypeFromExtension } from "ente-media/live-photo";
-import { computeNormalCollectionFilesFromSaved } from "ente-new/photos/services/file";
+import {
+    savedHiddenCollections,
+    savedNormalCollections,
+} from "ente-new/photos/services/collection";
 import { indexNewUpload } from "ente-new/photos/services/ml";
+import {
+    savedCollectionFileByID,
+    savedCollectionFileChunksForCollections,
+} from "ente-new/photos/services/photos-fdb";
 import { settingsSnapshot } from "ente-new/photos/services/settings";
 import { wait } from "ente-utils/promise";
 import watcher from "./watch";
@@ -308,6 +321,20 @@ const groupByResult = (finishedUploads: FinishedUploads) => {
     return groups;
 };
 
+const existingMetadataKey = (metadata: FileMetadata) => {
+    const hash = metadataHash(metadata);
+    return hash
+        ? `${metadata.title}\u0000${metadata.fileType}\u0000${hash}`
+        : undefined;
+};
+
+const existingFileKey = (file: EnteFile) => {
+    const hash = metadataHash(file.metadata);
+    return hash
+        ? `${fileFileName(file)}\u0000${file.metadata.fileType}\u0000${hash}`
+        : undefined;
+};
+
 class UploadManager {
     // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
     private comlinkCryptoWorkers: ComlinkWorker<typeof CryptoWorker>[] =
@@ -316,6 +343,14 @@ class UploadManager {
     private itemsToBeUploaded: ClusteredUploadItem[] = [];
     private failedItems: ClusteredUploadItem[] = [];
     private existingFiles: EnteFile[] = [];
+    private existingFileFinder: ExistingFileFinder = (metadata) =>
+        Promise.resolve(
+            this.existingFiles.filter(
+                (file) =>
+                    existingFileKey(file) == existingMetadataKey(metadata),
+            ),
+        );
+    private existingFilesLoadedForWatcherSession: number | undefined;
     private itemResults: UploadBatchItemResult[] = [];
     private onUploadFile: ((file: EnteFile) => void) | undefined;
     private collections = new Map<number, Collection>();
@@ -522,9 +557,96 @@ class UploadManager {
     };
 
     private async updateExistingFilesAndCollections(collections: Collection[]) {
-        const files = await computeNormalCollectionFilesFromSaved();
-        const userID = ensureLocalUser().id;
-        this.existingFiles = files.filter((file) => file.ownerID == userID);
+        const watcherSessionID =
+            isDesktop && watcher.isUploadRunning()
+                ? watcher.uploadSessionID()
+                : undefined;
+        if (
+            shouldReloadExistingFilesForUpload(
+                watcherSessionID,
+                this.existingFilesLoadedForWatcherSession,
+            )
+        ) {
+            const userID = ensureLocalUser().id;
+            const hiddenCollections = await savedHiddenCollections(userID);
+            const hiddenFileIDs = new Set<number>();
+            for await (const chunk of savedCollectionFileChunksForCollections(
+                hiddenCollections.map((collection) => collection.id),
+            )) {
+                for (const file of chunk) hiddenFileIDs.add(file.id);
+            }
+
+            const referencesByKey = new Map<
+                string,
+                { id: number; collectionID: number }[]
+            >();
+            const normalCollections = await savedNormalCollections();
+            for await (const chunk of savedCollectionFileChunksForCollections(
+                normalCollections.map((collection) => collection.id),
+            )) {
+                for (const file of chunk) {
+                    if (file.ownerID != userID || hiddenFileIDs.has(file.id))
+                        continue;
+                    const key = existingFileKey(file);
+                    if (!key) continue;
+                    const references = referencesByKey.get(key) ?? [];
+                    references.push({
+                        id: file.id,
+                        collectionID: file.collectionID,
+                    });
+                    referencesByKey.set(key, references);
+                }
+            }
+            const resolvedFiles = new Map<
+                string,
+                Promise<EnteFile | undefined>
+            >();
+            // ponytail: retain at most 512 matched files; reload older matches
+            // from IndexedDB when needed instead of growing renderer heap.
+            const maxResolvedFiles = 512;
+            this.existingFiles = [];
+            this.existingFileFinder = async (metadata, collectionID) => {
+                const key = existingMetadataKey(metadata);
+                if (!key) return [];
+                const matches = this.existingFiles.filter(
+                    (file) => existingFileKey(file) == key,
+                );
+                const references = referencesByKey.get(key) ?? [];
+                const referencesToResolve = [
+                    ...references.filter(
+                        (reference) => reference.collectionID == collectionID,
+                    ),
+                    ...references.filter(
+                        (reference) => reference.collectionID != collectionID,
+                    ),
+                ].slice(0, 2);
+                const persistedMatches = await Promise.all(
+                    referencesToResolve.map((reference) => {
+                        const referenceKey = `${reference.collectionID}:${reference.id}`;
+                        let resolved = resolvedFiles.get(referenceKey);
+                        if (!resolved) {
+                            resolved = savedCollectionFileByID(
+                                reference.collectionID,
+                                reference.id,
+                            );
+                            resolvedFiles.set(referenceKey, resolved);
+                            if (resolvedFiles.size > maxResolvedFiles)
+                                resolvedFiles.delete(
+                                    resolvedFiles.keys().next().value!,
+                                );
+                        }
+                        return resolved;
+                    }),
+                );
+                return [
+                    ...matches,
+                    ...persistedMatches.filter(
+                        (file): file is EnteFile => !!file,
+                    ),
+                ];
+            };
+        }
+        this.existingFilesLoadedForWatcherSession = watcherSessionID;
         this.collections = new Map(
             collections.map((collection) => [collection.id, collection]),
         );
@@ -564,9 +686,22 @@ class UploadManager {
             this.comlinkCryptoWorkers[i]?.terminate();
             this.comlinkCryptoWorkers[i] = createComlinkCryptoWorker();
             const worker = await this.comlinkCryptoWorkers[i]!.remote;
-            uploadProcesses.push(this.uploadNextItemInQueue(worker, options));
+            uploadProcesses.push(
+                this.uploadNextItemInQueue(worker, options).catch(
+                    (error: unknown) => {
+                        if (!this.fatalUploadError) {
+                            this.fatalUploadError =
+                                error instanceof Error
+                                    ? error
+                                    : new Error(String(error));
+                        }
+                        this.itemsToBeUploaded = [];
+                        throw error;
+                    },
+                ),
+            );
         }
-        await Promise.all(uploadProcesses);
+        await settleUploadWorkers(uploadProcesses);
     }
 
     private async uploadNextItemInQueue(
@@ -584,6 +719,8 @@ class UploadManager {
             skipDuplicateAddToUploadCollection:
                 options?.skipDuplicateAddToUploadCollection,
             includePartnerSharedFiles: options?.includePartnerSharedFiles,
+            skipMultipartChecksums: isDesktop && watcher.isUploadRunning(),
+            stopOnUploadError: isDesktop && watcher.isUploadRunning(),
             abortIfCancelled: this.abortIfCancelled.bind(this),
             updateUploadProgress:
                 uiService.updateUploadProgress.bind(uiService),
@@ -606,7 +743,7 @@ class UploadManager {
                 uploadResult = await upload(
                     uploadableItem,
                     undefined,
-                    this.existingFiles,
+                    this.existingFileFinder,
                     this.parsedMetadataJSONMap,
                     worker,
                     uploadContext,
@@ -671,8 +808,12 @@ class UploadManager {
                     {
                         const { file } = uploadResult;
 
-                        indexNewUpload(file, processableUploadItem);
-                        processVideoNewUpload(file, processableUploadItem);
+                        // Defer live ML indexing during folder-watch uploads;
+                        // each completion can trigger a full cluster refresh.
+                        if (!watcher.isUploadRunning()) {
+                            indexNewUpload(file, processableUploadItem);
+                            processVideoNewUpload(file, processableUploadItem);
+                        }
 
                         this.updateExistingFiles(file);
                     }

@@ -170,6 +170,10 @@ export const pullMLStatus = async () => {
 
 export const mlSync = async (reason: ClusterFacesReason = "ml-sync") => {
     if (!_state.isMLEnabled) return;
+    if (mlWorkDeferred) {
+        pendingMLSyncReason = reason;
+        return;
+    }
     if (_state.isSyncing) return;
     _state.isSyncing = true;
 
@@ -189,6 +193,11 @@ export const mlSync = async (reason: ClusterFacesReason = "ml-sync") => {
 };
 
 const updateClustersAndPeople = async (reason: ClusterFacesReason) => {
+    if (mlWorkDeferred) {
+        clusterUpdatePending = true;
+        return;
+    }
+
     const masterKey = await ensureMasterKeyFromSession();
 
     await pullUserEntities("cgroup", masterKey);
@@ -204,13 +213,51 @@ const debounceUpdateClustersAndPeople = pDebounce(
     30 * 1e3,
 );
 
+let clusterUpdatesDeferred = false;
+let clusterUpdatePending = false;
+let mlWorkDeferred = false;
+let pendingMLSyncReason: ClusterFacesReason | undefined;
+let pendingMLSyncTimer: ReturnType<typeof setTimeout> | undefined;
+
+// Let gallery reducer state settle before starting a deferred full-library pass.
+const pendingMLSyncDelay = 1000;
+const schedulePendingMLSync = () => {
+    if (mlWorkDeferred || !pendingMLSyncReason || pendingMLSyncTimer) return;
+
+    pendingMLSyncTimer = setTimeout(() => {
+        pendingMLSyncTimer = undefined;
+        if (mlWorkDeferred || !pendingMLSyncReason) return;
+
+        const reason = pendingMLSyncReason;
+        pendingMLSyncReason = undefined;
+        void mlSync(reason);
+    }, pendingMLSyncDelay);
+};
+
+/** Defer expensive ML work while folder-watch work is active. */
+export const setMLClusterUpdatesDeferred = (deferred: boolean) => {
+    if (deferred && !mlWorkDeferred) void terminateMLWorker();
+    mlWorkDeferred = deferred;
+    clusterUpdatesDeferred = deferred;
+    if (!deferred && clusterUpdatePending) {
+        clusterUpdatePending = false;
+        void debounceUpdateClustersAndPeople("live-upload-index");
+    }
+    if (!deferred) schedulePendingMLSync();
+};
+
 const workerDidLoseElectronPort = () => {
     log.error("Discarding the ML worker since its utility process exited");
     void terminateMLWorker();
 };
 
-const workerDidUnawaitedIndex = () =>
+const workerDidUnawaitedIndex = () => {
+    if (clusterUpdatesDeferred) {
+        clusterUpdatePending = true;
+        return;
+    }
     void debounceUpdateClustersAndPeople("live-upload-index");
+};
 
 export const indexNewUpload = (
     file: EnteFile,

@@ -353,9 +353,8 @@ export const Upload: React.FC<UploadProps> = ({
                 setDesktopFilePaths(filePaths);
             };
 
-            watcher.init(
-                upload,
-                () => void onRemotePull({ source: "watcher-upload" }),
+            watcher.init(upload, () =>
+                onRemotePull({ source: "watcher-upload", strict: true }),
             );
 
             void electron.pendingUploads().then((pending) => {
@@ -999,15 +998,17 @@ export const Upload: React.FC<UploadProps> = ({
 
     const preUploadAction = async (
         parsedMetadataJSONMap?: Map<string, ParsedMetadataJSON>,
+        refreshGallery = true,
     ) => {
         uploadManager.prepareForNewUpload(parsedMetadataJSONMap);
         uploadManager.showUploadProgressDialog();
-        await onRemotePull({ silent: true, source: "pre-upload" });
+        if (refreshGallery)
+            await onRemotePull({ silent: true, source: "pre-upload" });
     };
 
-    function postUploadAction() {
+    function postUploadAction(refreshGallery = true) {
         resetUploadUIState();
-        void onRemotePull({ source: "post-upload" });
+        if (refreshGallery) void onRemotePull({ source: "post-upload" });
     }
 
     const uploadFiles = async (
@@ -1016,6 +1017,7 @@ export const Upload: React.FC<UploadProps> = ({
         opts?: UploadFilesOptions,
     ) => {
         const isFolderWatchUpload = isDesktop && watcher.isUploadRunning();
+        let refreshGallery = true;
         const handleResult = async (result: UploadBatchResult) => {
             await handlePostUploadBatchResult(
                 result,
@@ -1034,7 +1036,7 @@ export const Upload: React.FC<UploadProps> = ({
                 opts?.importTakeoutFavorites ?? true;
             retryIncludePartnerSharedFiles.current =
                 opts?.includePartnerSharedFiles ?? true;
-            await preUploadAction();
+            await preUploadAction(undefined, !isFolderWatchUpload);
             if (
                 opts?.persistPendingUploads &&
                 electron &&
@@ -1070,6 +1072,7 @@ export const Upload: React.FC<UploadProps> = ({
             if (isDesktop) {
                 if (isFolderWatchUpload) {
                     await watcher.allFileUploadsDone(uploadItemsWithCollection);
+                    refreshGallery = false;
                 } else if (watcher.isSyncPaused()) {
                     // Resume the watch upload displaced by this user upload.
                     watcher.resumePausedSync();
@@ -1077,10 +1080,21 @@ export const Upload: React.FC<UploadProps> = ({
             }
         } catch (e) {
             log.error("Failed to upload files", e);
+            if (isFolderWatchUpload) {
+                refreshGallery = false;
+                try {
+                    if (watcher.isUploadRunning())
+                        await watcher.allFileUploadsDone(
+                            uploadItemsWithCollection,
+                        );
+                } finally {
+                    watcher.rescanAfterFailedUpload();
+                }
+            }
             closeUploadProgress();
             notifyUser(e);
         } finally {
-            postUploadAction();
+            postUploadAction(refreshGallery);
         }
     };
 

@@ -1,3 +1,4 @@
+import { HTTPError } from "ente-base/http";
 import type { RawExifTags } from "ente-gallery/services/exif";
 import {
     parseDateFromDigitGroups,
@@ -10,6 +11,12 @@ import {
     parseXMPSidecarTags,
     tryParseXMPSidecar,
 } from "ente-gallery/services/upload/metadata-json";
+import {
+    settleUploadWorkers,
+    shouldAbortUploadOnError,
+    shouldReloadExistingFilesForUpload,
+    shouldSendMultipartPartChecksums,
+} from "ente-gallery/services/upload/upload-service";
 import { describe, expect, test } from "vitest";
 
 const dateCases = [
@@ -115,6 +122,67 @@ const xmpDescriptionTag = (description: string) => ({
     value: [xmpTag(description)],
     description,
     attributes: {},
+});
+
+describe("upload worker lifecycle", () => {
+    test("waits for sibling workers before propagating failure", async () => {
+        let resolveSibling!: () => void;
+        let siblingFinished = false;
+        const sibling = new Promise<void>((resolve) => {
+            resolveSibling = () => {
+                siblingFinished = true;
+                resolve();
+            };
+        });
+        const failure = new Error("upload failed");
+
+        let settled = false;
+        const result = settleUploadWorkers([Promise.reject(failure), sibling]);
+        void result.then(
+            () => (settled = true),
+            () => (settled = true),
+        );
+        await Promise.resolve();
+        expect(settled).toBe(false);
+
+        resolveSibling();
+        await expect(result).rejects.toBe(failure);
+        expect(siblingFinished).toBe(true);
+    });
+});
+
+describe("folder-watch upload failure policy", () => {
+    test("fails fast only for HTTP errors during folder-watch uploads", () => {
+        const error = new HTTPError({
+            url: "https://example.test/file-upload",
+            status: 500,
+            statusText: "Internal Server Error",
+            headers: new Headers(),
+        } as Response);
+
+        expect(shouldAbortUploadOnError(error, true)).toBe(true);
+        expect(shouldAbortUploadOnError(error, false)).toBe(false);
+    });
+});
+
+describe("upload existing-file cache", () => {
+    test("reuses existing files across one watcher session", () => {
+        expect(shouldReloadExistingFilesForUpload(7, 7)).toBe(false);
+        expect(shouldReloadExistingFilesForUpload(7, 6)).toBe(true);
+        expect(shouldReloadExistingFilesForUpload(7, undefined)).toBe(true);
+        expect(shouldReloadExistingFilesForUpload(undefined, 7)).toBe(true);
+    });
+});
+
+describe("multipart upload memory policy", () => {
+    test("keeps checksums for normal uploads", () => {
+        expect(shouldSendMultipartPartChecksums(true, false)).toBe(true);
+        expect(shouldSendMultipartPartChecksums(false, true)).toBe(true);
+    });
+
+    test("skips checksum buffering for watcher uploads", () => {
+        expect(shouldSendMultipartPartChecksums(true, false, true)).toBe(false);
+    });
 });
 
 describe("upload filename metadata", () => {

@@ -16,9 +16,7 @@ export const messagePortMainEndpoint = (mp: MessagePortMain): Endpoint => {
                 "handleEvent" in eh
                     ? eh.handleEvent({ data } as MessageEvent)
                     : eh(data as unknown as MessageEvent);
-            mp.on("message", (data) => {
-                l(data);
-            });
+            mp.on("message", l);
             listeners.set(eh, l);
         },
         removeEventListener: (_, eh) => {

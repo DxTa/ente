@@ -126,16 +126,18 @@ export const LocalEnteFiles = z.array(LocalEnteFile);
 export const transformFilesIfNeeded = (files: EnteFile[]) =>
     isFilesTransformNeeded(files) ? files.map(transformFile) : files;
 
+export const transformFileIfNeeded = (file: EnteFile) =>
+    isFileTransformNeeded(file) ? transformFile(file) : file;
+
 // Avoid running the per-file migration across 200k clean records.
 const isFilesTransformNeeded = (
     files: (EnteFile & { isDeleted?: unknown })[],
-) =>
-    !!files.find(
-        (file) =>
-            "isDeleted" in file ||
-            !file.metadata.modificationTime ||
-            typeof file.metadata.fileType != "number",
-    );
+) => !!files.find(isFileTransformNeeded);
+
+const isFileTransformNeeded = (file: EnteFile & { isDeleted?: unknown }) =>
+    "isDeleted" in file ||
+    !file.metadata.modificationTime ||
+    typeof file.metadata.fileType != "number";
 
 const transformFile = (file: EnteFile & { isDeleted?: unknown }) => {
     const {

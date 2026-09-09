@@ -135,6 +135,15 @@ type GalleryAction =
     | { type: "setUserDetails"; userDetails: UserDetails }
     | { type: "setCollections"; collections: Collection[] }
     | { type: "setCollectionFiles"; collectionFiles: EnteFile[] }
+    | {
+          type: "mergeCollectionFileChange";
+          collectionID: number;
+          updatedFiles: EnteFile[];
+          deletedFileIDs: number[];
+          collectionDeleted?: boolean;
+      }
+    | { type: "appendCollectionFiles"; collectionFiles: EnteFile[] }
+    | { type: "finishCollectionFileHydration" }
     | { type: "uploadFile"; file: EnteFile }
     | { type: "setTrashItems"; trashItems: TrashItem[] }
     | { type: "setPeopleState"; peopleState: PeopleState | undefined }
@@ -206,6 +215,9 @@ const initialGalleryState: GalleryState = {
     isInSearchMode: false,
     searchSortAsc: undefined,
 };
+
+const fileKey = (file: Pick<EnteFile, "collectionID" | "id">) =>
+    `${file.collectionID}:${file.id}`;
 
 const galleryReducer: React.Reducer<GalleryState, GalleryAction> = (
     state,
@@ -453,6 +465,72 @@ const galleryReducer: React.Reducer<GalleryState, GalleryAction> = (
                 ...stateForUpdatedCollectionFiles(state, collectionFiles),
                 lastSyncedCollectionFiles,
                 unsyncedPrivateMagicMetadataUpdates: new Map(),
+            });
+        }
+
+        case "mergeCollectionFileChange": {
+            const deletedFileIDs = new Set(action.deletedFileIDs);
+            const filesByID = new Map(
+                state.collectionFiles
+                    .filter(
+                        (file) =>
+                            !(
+                                file.collectionID == action.collectionID &&
+                                deletedFileIDs.has(file.id)
+                            ) &&
+                            (!action.collectionDeleted ||
+                                file.collectionID != action.collectionID),
+                    )
+                    .map((file) => [fileKey(file), file]),
+            );
+            for (const file of action.updatedFiles)
+                filesByID.set(fileKey(file), file);
+
+            const lastSyncedCollectionFiles = sortFiles([
+                ...filesByID.values(),
+            ]);
+            const collectionFiles = deriveCollectionFiles(
+                lastSyncedCollectionFiles,
+                state.unsyncedPrivateMagicMetadataUpdates,
+            );
+            return stateByUpdatingFilteredFiles({
+                ...stateForUpdatedCollectionFiles(state, collectionFiles),
+                lastSyncedCollectionFiles,
+                unsyncedPrivateMagicMetadataUpdates: new Map(),
+            });
+        }
+
+        case "appendCollectionFiles": {
+            const filesByID = new Map(
+                state.collectionFiles.map((file) => [fileKey(file), file]),
+            );
+            for (const file of action.collectionFiles) {
+                if (!filesByID.has(fileKey(file)))
+                    filesByID.set(fileKey(file), file);
+            }
+            const collectionFiles = [...filesByID.values()];
+
+            // Defer derived indexes until all persisted chunks are loaded. Rebuilding
+            // them per chunk briefly retains several full-library copies.
+            return {
+                ...state,
+                collectionFiles,
+                lastSyncedCollectionFiles: collectionFiles,
+            };
+        }
+
+        case "finishCollectionFileHydration": {
+            const lastSyncedCollectionFiles = sortFiles(
+                state.lastSyncedCollectionFiles,
+            );
+            const collectionFiles = deriveCollectionFiles(
+                lastSyncedCollectionFiles,
+                state.unsyncedPrivateMagicMetadataUpdates,
+            );
+
+            return stateByUpdatingFilteredFiles({
+                ...stateForUpdatedCollectionFiles(state, collectionFiles),
+                lastSyncedCollectionFiles,
             });
         }
 

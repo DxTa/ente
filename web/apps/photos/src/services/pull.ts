@@ -8,8 +8,10 @@ import type { Collection } from "ente-media/collection";
 import type { EnteFile } from "ente-media/file";
 import {
     movePendingRemovalActionsToUncategorized,
+    pullCollectionFileDiffs,
     pullCollectionFiles,
     pullCollections,
+    type CollectionFileChange,
 } from "ente-new/photos/services/collection";
 import {
     isMLSupported,
@@ -25,9 +27,13 @@ export const prePullFiles = async () => {
     await Promise.all([pullSettings(), isMLSupported && pullMLStatus()]);
 };
 
+type CollectionFileSyncMode = "full" | "incremental" | "bootstrap";
+
 interface PullFilesOpts {
+    collectionFileSyncMode?: CollectionFileSyncMode;
     onSetCollections: (collections: Collection[]) => void;
     onSetCollectionFiles: (collectionFiles: EnteFile[]) => void;
+    onCollectionFileChange?: (change: CollectionFileChange) => void;
     onSetTrashedItems: (trashItems: TrashItem[]) => void;
     onDidUpdateCollectionFiles: () => void;
 }
@@ -37,10 +43,15 @@ export const pullFiles = async (opts?: PullFilesOpts) => {
     await ensureAuthenticatedSession();
     const collections = await pullCollections();
     opts?.onSetCollections(collections);
-    const didUpdateFiles = await pullCollectionFiles(
-        collections,
-        opts?.onSetCollectionFiles,
-    );
+    const syncMode = opts?.collectionFileSyncMode ?? "full";
+    const didUpdateFiles =
+        syncMode == "full"
+            ? await pullCollectionFiles(collections, opts?.onSetCollectionFiles)
+            : await pullCollectionFileDiffs(
+                  collections,
+                  opts?.onCollectionFileChange,
+                  syncMode,
+              );
     await pullTrash(
         collections,
         opts?.onSetTrashedItems,
@@ -66,7 +77,22 @@ export const pullFiles = async (opts?: PullFilesOpts) => {
 };
 
 export const postPullFiles = async (source?: string) => {
-    await Promise.all([searchDataSync(), videoProcessingSyncIfNeeded()]);
-    // Initial indexing can be long; do not block the remote pull.
-    void mlSync(source ? `remote-pull:${source}` : "remote-pull");
+    await Promise.all([
+        searchDataSync(),
+        source == "watcher-upload" ||
+        source == "gallery-mount" ||
+        source == "gallery-periodic" ||
+        source == "desktop-focus"
+            ? undefined
+            : videoProcessingSyncIfNeeded(),
+    ]);
+    // ML sync might take a very long time for initial indexing, so don't wait
+    // for it to finish. Automatic pulls should not start full-library ML work;
+    // explicit, upload, and watcher-completion pulls will catch up when needed.
+    if (
+        source != "gallery-mount" &&
+        source != "gallery-periodic" &&
+        source != "desktop-focus"
+    )
+        void mlSync(source ? `remote-pull:${source}` : "remote-pull");
 };

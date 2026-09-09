@@ -3,6 +3,7 @@ import { blobCache } from "ente-base/blob-cache";
 import { boxSeal, encryptBox, generateKey } from "ente-base/crypto";
 import { haveWindow } from "ente-base/env";
 import { authenticatedRequestHeaders, ensureOk } from "ente-base/http";
+import log from "ente-base/log";
 import { apiURL } from "ente-base/origins";
 import { ensureMasterKeyFromSession } from "ente-base/session";
 import { groupFilesByCollectionID } from "ente-gallery/utils/file";
@@ -36,11 +37,19 @@ import { batch, splitByPredicate } from "ente-utils/array";
 import { z } from "zod";
 import { batched, type UpdateMagicMetadataRequest } from "./file";
 import {
+    ensureV2FileManifest,
+    hasCompletedV2RemoteFileSync,
+    markV2RemoteFileSyncComplete,
+    mergeCollectionFilesForCollection,
+    prepareV2RemoteFileSync,
+    removeCollectionFilesForCollections,
     removeCollectionIDLastSyncTime,
     saveCollectionFiles,
+    saveCollectionFilesForCollection,
     saveCollectionLastSyncTime,
     saveCollections,
     saveCollectionsUpdationTime,
+    savedCollectionFileCollectionIDs,
     savedCollectionFiles,
     savedCollectionLastSyncTime,
     savedCollections,
@@ -270,7 +279,9 @@ export const pullCollectionFiles = async (
 
             files = otherFiles.concat([...thisCollectionFilesByID.values()]);
 
-            await saveCollectionFiles(files);
+            await saveCollectionFilesForCollection(collection.id, [
+                ...thisCollectionFilesByID.values(),
+            ]);
             await saveCollectionLastSyncTime(collection, sinceTime);
             onSetCollectionFiles?.(files);
             didUpdateFiles = true;
@@ -285,6 +296,130 @@ export const pullCollectionFiles = async (
     return didUpdateFiles;
 };
 
+export interface CollectionFileChange {
+    collectionID: number;
+    updatedFiles: EnteFile[];
+    deletedFileIDs: number[];
+    collectionDeleted?: boolean;
+}
+
+/** Pull collection diffs without materializing existing library files. */
+export const pullCollectionFileDiffs = async (
+    collections: Collection[],
+    onChange?: (change: CollectionFileChange) => void,
+    mode: "incremental" | "bootstrap" = "incremental",
+) => {
+    let didUpdateFiles = false;
+    let changedCollections = 0;
+    let pages = 0;
+    let updatedFileCount = 0;
+    let deletedFileCount = 0;
+    let skippedAtCursor = 0;
+    let zeroCursorCollections = 0;
+    let emptyFirstPageCollections = 0;
+    const reconciliationComplete = await hasCompletedV2RemoteFileSync();
+    const bootstrap = !reconciliationComplete;
+    const notifyChange =
+        bootstrap || mode == "bootstrap" ? undefined : onChange;
+    if (bootstrap) await prepareV2RemoteFileSync();
+    const collectionIDs = new Set(
+        collections.map((collection) => collection.id),
+    );
+    const staleCollectionIDs = (
+        await savedCollectionFileCollectionIDs()
+    ).filter((id) => !collectionIDs.has(id));
+
+    await removeCollectionFilesForCollections(staleCollectionIDs);
+    await Promise.all(
+        staleCollectionIDs.map((collectionID) =>
+            removeCollectionIDLastSyncTime(collectionID),
+        ),
+    );
+    for (const collectionID of staleCollectionIDs) {
+        notifyChange?.({
+            collectionID,
+            updatedFiles: [],
+            deletedFileIDs: [],
+            collectionDeleted: true,
+        });
+        didUpdateFiles = true;
+    }
+
+    for (const collection of collections) {
+        let sinceTime = bootstrap
+            ? 0
+            : ((await savedCollectionLastSyncTime(collection)) ?? 0);
+        if (!bootstrap && sinceTime == collection.updationTime) {
+            skippedAtCursor++;
+            continue;
+        }
+        if (sinceTime == 0) zeroCursorCollections++;
+        changedCollections++;
+
+        let firstPage = true;
+        while (true) {
+            const { diff, hasMore } = await getCollectionDiff(
+                collection.id,
+                sinceTime,
+            );
+            pages++;
+            if (!diff.length) {
+                if (firstPage && sinceTime == 0) emptyFirstPageCollections++;
+                break;
+            }
+            firstPage = false;
+
+            const updatedFiles: EnteFile[] = [];
+            const deletedFileIDs: number[] = [];
+            for (const change of diff) {
+                sinceTime = Math.max(sinceTime, change.updationTime);
+                if (change.isDeleted) {
+                    deletedFileIDs.push(change.id);
+                } else {
+                    updatedFiles.push(
+                        await decryptRemoteFile(change, collection.key),
+                    );
+                }
+            }
+
+            const merged = await mergeCollectionFilesForCollection(
+                collection.id,
+                updatedFiles,
+                deletedFileIDs,
+            );
+            for (const file of merged.updatedFiles)
+                await clearCachedThumbnail(file);
+            updatedFileCount += merged.updatedFiles.length;
+            deletedFileCount += merged.deletedFileIDs.length;
+            await saveCollectionLastSyncTime(collection, sinceTime);
+            if (
+                merged.updatedFiles.length > 0 ||
+                merged.deletedFileIDs.length > 0
+            ) {
+                notifyChange?.({
+                    collectionID: collection.id,
+                    updatedFiles: merged.updatedFiles,
+                    deletedFileIDs: merged.deletedFileIDs,
+                });
+                didUpdateFiles = true;
+            }
+
+            if (!hasMore) break;
+        }
+
+        await saveCollectionLastSyncTime(collection, collection.updationTime);
+    }
+
+    if (bootstrap) {
+        await ensureV2FileManifest();
+        await markV2RemoteFileSyncComplete();
+    }
+    log.info(
+        `Incremental file pull: mode=${mode}, bootstrap=${bootstrap}, marker=${reconciliationComplete}, ${collections.length} collections, ${changedCollections} changed, ${skippedAtCursor} skipped-at-cursor, ${zeroCursorCollections} zero-cursor, ${emptyFirstPageCollections} empty-first-page, ${pages} diff pages, ${updatedFileCount} updated, ${deletedFileCount} deleted`,
+    );
+    return didUpdateFiles;
+};
+
 const getCollectionDiff = async (collectionID: number, sinceTime: number) => {
     const res = await fetch(
         await apiURL("/collections/v2/diff", { collectionID, sinceTime }),
@@ -292,6 +427,11 @@ const getCollectionDiff = async (collectionID: number, sinceTime: number) => {
     );
     ensureOk(res);
     return FileDiffResponse.parse(await res.json());
+};
+
+const clearCachedThumbnail = async (file: EnteFile) => {
+    const thumbnailCache = await blobCache("thumbs");
+    await thumbnailCache.delete(file.id.toString());
 };
 
 const clearCachedThumbnailIfContentChanged = async (

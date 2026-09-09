@@ -1,4 +1,9 @@
-import { wrap } from "comlink";
+/**
+ * @file A bridge to the ffmpeg utility process. This code runs in the main
+ * process.
+ */
+
+import { wrap, type Remote } from "comlink";
 import fs from "node:fs/promises";
 import type { FFmpegCommand, ZipItem } from "../../types/ipc";
 import {
@@ -9,11 +14,29 @@ import {
 import type { FFmpegUtilityProcess } from "./ffmpeg-worker";
 import { ffmpegUtilityProcessEndpoint } from "./workers";
 
-export const ffmpegUtilityProcess = () =>
-    ffmpegUtilityProcessEndpoint().then((port) =>
-        wrap<FFmpegUtilityProcess>(port),
-    );
+/** Cache one Comlink wrapper per utility-process endpoint. */
+let ffmpegWorkerEndpoint: ReturnType<typeof ffmpegUtilityProcessEndpoint>;
+let ffmpegWorker: Promise<Remote<FFmpegUtilityProcess>> | undefined;
 
+/**
+ * Return a handle to the ffmpeg utility process, starting it if needed.
+ */
+export const ffmpegUtilityProcess = () => {
+    const endpoint = ffmpegUtilityProcessEndpoint();
+    if (ffmpegWorkerEndpoint !== endpoint) {
+        ffmpegWorkerEndpoint = endpoint;
+        ffmpegWorker = endpoint.then((port) =>
+            wrap<FFmpegUtilityProcess>(port),
+        );
+    }
+    return ffmpegWorker!;
+};
+
+/**
+ * Implement the IPC "ffmpegExec" contract, writing the input and output to
+ * temporary files as needed, and then forward to the {@link ffmpegExec} running
+ * in the utility process.
+ */
 export const ffmpegExec = async (
     command: FFmpegCommand,
     pathOrZipItem: string | ZipItem,
@@ -51,6 +74,11 @@ export const withInputFile = async <T>(
     }
 };
 
+/**
+ * Implement the IPC "ffmpegDetermineVideoDuration" contract, writing the input
+ * to temporary files as needed, and then forward to the
+ * {@link ffmpegDetermineVideoDuration} running in the utility process.
+ */
 export const ffmpegDetermineVideoDuration = async (
     pathOrZipItem: string | ZipItem,
 ): Promise<number> =>

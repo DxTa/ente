@@ -149,7 +149,8 @@ import {
     resolveQuickLinkURL,
 } from "ente-gallery/utils/quick-link";
 import {
-    savedCollectionFiles,
+    hasCompletedV2RemoteFileSync,
+    savedCollectionFileChunks,
     savedCollections,
     savedTrashItems,
 } from "ente-new/photos/services/photos-fdb";
@@ -189,6 +190,76 @@ const Page: React.FC = () => {
 
     const isOffline = useIsOffline();
     const [state, dispatch] = useGalleryReducer();
+    const localFileChunksRef = useRef<AsyncGenerator<EnteFile[]> | undefined>(
+        undefined,
+    );
+    const localFileLoadInProgressRef = useRef(false);
+    const localFileHydrationCancelledRef = useRef(false);
+    const localFileHydrationRunRef = useRef(0);
+    const localFileHydrationPromiseRef = useRef<Promise<boolean> | undefined>(
+        undefined,
+    );
+    const isInitialGalleryLoadRef = useRef(false);
+
+    const loadMoreLocalFiles = useCallback(
+        async (
+            showProgress: boolean,
+            finish: boolean,
+            isCurrent: () => boolean,
+        ) => {
+            const chunks = localFileChunksRef.current;
+            if (!chunks || localFileLoadInProgressRef.current) return;
+
+            localFileLoadInProgressRef.current = true;
+            const ownsLoadingBar =
+                showProgress && !isInitialGalleryLoadRef.current;
+            if (ownsLoadingBar) showLoadingBar();
+            try {
+                const files: EnteFile[] = [];
+                let reachedEnd = false;
+                while (files.length < 16_384) {
+                    const result = await chunks.next();
+                    if (!isCurrent()) return;
+                    if (result.done) {
+                        localFileChunksRef.current = undefined;
+                        reachedEnd = true;
+                        break;
+                    }
+                    files.push(...result.value);
+                }
+                if (!isCurrent()) return;
+                if (files.length > 0) {
+                    dispatch({
+                        type: "appendCollectionFiles",
+                        collectionFiles: files,
+                    });
+                }
+                if (finish || reachedEnd)
+                    dispatch({ type: "finishCollectionFileHydration" });
+            } finally {
+                localFileLoadInProgressRef.current = false;
+                if (ownsLoadingBar) hideLoadingBar();
+            }
+        },
+        [hideLoadingBar, showLoadingBar],
+    );
+
+    const hydrateRemainingLocalFiles = useCallback(
+        async (run: number) => {
+            const isCancelled = () =>
+                localFileHydrationCancelledRef.current ||
+                localFileHydrationRunRef.current != run;
+            const hasChunks = () => localFileChunksRef.current !== undefined;
+            const isCurrent = () => !isCancelled();
+
+            while (isCurrent() && hasChunks()) {
+                await new Promise<void>((resolve) => setTimeout(resolve, 50));
+                if (!isCurrent() || !hasChunks()) return;
+                await loadMoreLocalFiles(false, false, isCurrent);
+            }
+        },
+        [loadMoreLocalFiles],
+    );
 
     const [isFirstLoad, setIsFirstLoad] = useState(false);
     const [isContextMenuOpen, setIsContextMenuOpen] = useState(false);
@@ -446,6 +517,7 @@ const Page: React.FC = () => {
         tempDeletedFileIDs,
         tempHiddenFileIDs,
     ]);
+
     const mapFileSource = useMemo(
         () => ({
             collectionFiles: state.collectionFiles,
@@ -485,11 +557,17 @@ const Page: React.FC = () => {
 
     useEffect(() => {
         const electron = globalThis.electron;
+        const hydrationRun = ++localFileHydrationRunRef.current;
+        const isCurrent = () =>
+            localFileHydrationRunRef.current == hydrationRun &&
+            !localFileHydrationCancelledRef.current;
         let syncIntervalID: ReturnType<typeof setInterval> | undefined;
         let unsubscribeMainWindowFocus: (() => void) | undefined;
 
         void (async () => {
+            localFileHydrationCancelledRef.current = false;
             const authToken = await savedAuthToken();
+            if (!isCurrent()) return;
             if (!haveMasterKeyInSession() || !authToken) {
                 stashRedirect("/gallery");
                 void router.push("/");
@@ -512,6 +590,7 @@ const Page: React.FC = () => {
                 }
                 return;
             }
+            if (!isCurrent()) return;
 
             preloadImage("/images/subscription-card-background");
             initSettings();
@@ -534,34 +613,71 @@ const Page: React.FC = () => {
                 );
             });
             const userDetails = await savedUserDetailsOrTriggerPull();
+            const [collections, trashItems] = await Promise.all([
+                savedCollections(),
+                savedTrashItems(),
+            ]);
+            if (!isCurrent()) return;
             dispatch({
                 type: "mount",
                 user,
                 familyData: userDetails?.familyData,
-                collections: await savedCollections(),
-                collectionFiles: await savedCollectionFiles(),
-                trashItems: await savedTrashItems(),
+                collections,
+                collectionFiles: [],
+                trashItems,
             });
 
-            // Join first so the initial pull includes the new album.
+            isInitialGalleryLoadRef.current = true;
+            showLoadingBar();
             let joinedAlbumId: number | null = null;
-
-            if (hasPendingAlbumToJoin()) {
-                try {
-                    const joinedCollectionId = await processPendingAlbumJoin();
-                    if (joinedCollectionId) {
-                        joinedAlbumId = joinedCollectionId;
+            try {
+                // Join first so the initial pull includes the new album.
+                if (hasPendingAlbumToJoin()) {
+                    try {
+                        const joinedCollectionId =
+                            await processPendingAlbumJoin();
+                        if (joinedCollectionId) {
+                            joinedAlbumId = joinedCollectionId;
+                        }
+                    } catch (error) {
+                        log.error("Failed to join album", error);
+                        showMiniDialog({
+                            title: t("error"),
+                            message:
+                                t("album_join_failed") +
+                                ": " +
+                                (error as Error).message,
+                        });
                     }
-                } catch (error) {
-                    log.error("Failed to join album", error);
-                    showMiniDialog({
-                        title: t("error"),
-                        message: t("album_join_failed"),
-                    });
                 }
-            }
 
-            await remotePull({ source: "gallery-mount" });
+                // Reconcile storage before taking the lazy gallery snapshot.
+                try {
+                    const completeLocalStorage =
+                        await hasCompletedV2RemoteFileSync();
+                    if (!isCurrent()) return;
+                    await remotePull({
+                        source: "gallery-mount",
+                        strict: !completeLocalStorage,
+                    });
+                } catch (error) {
+                    if (isCurrent()) {
+                        setIsFirstLoad(false);
+                        onGenericError(error);
+                    }
+                    return;
+                }
+                if (!isCurrent()) return;
+
+                // Load only the first bounded batch. Remaining files hydrate in
+                // the background through the same generator.
+                localFileChunksRef.current = savedCollectionFileChunks();
+                await loadMoreLocalFiles(true, true, isCurrent);
+            } finally {
+                isInitialGalleryLoadRef.current = false;
+                hideLoadingBar();
+            }
+            if (!isCurrent()) return;
 
             if (joinedAlbumId) {
                 dispatch({
@@ -571,6 +687,22 @@ const Page: React.FC = () => {
             }
 
             setIsFirstLoad(false);
+            const hydration = hydrateRemainingLocalFiles(hydrationRun)
+                .then(() => true)
+                .catch((error: unknown) => {
+                    if (!isCurrent()) return false;
+                    log.error(
+                        "Failed to hydrate remaining gallery files",
+                        error,
+                    );
+                    localFileChunksRef.current = undefined;
+                    return false;
+                });
+            localFileHydrationPromiseRef.current = hydration;
+            void hydration.then(() => {
+                if (localFileHydrationPromiseRef.current == hydration)
+                    localFileHydrationPromiseRef.current = undefined;
+            });
 
             syncIntervalID = setInterval(
                 () => remotePull({ silent: true, source: "gallery-periodic" }),
@@ -589,8 +721,14 @@ const Page: React.FC = () => {
         return () => {
             clearInterval(syncIntervalID);
             unsubscribeMainWindowFocus?.();
+            localFileHydrationCancelledRef.current = true;
+            localFileHydrationRunRef.current++;
+            localFileHydrationPromiseRef.current = undefined;
+            const chunks = localFileChunksRef.current;
+            if (chunks) void chunks.return(undefined);
+            localFileChunksRef.current = undefined;
         };
-    }, []);
+    }, [hydrateRemainingLocalFiles, loadMoreLocalFiles]);
 
     useEffect(() => {
         if (state.user && userDetails) {
@@ -797,11 +935,20 @@ const Page: React.FC = () => {
         setPendingFileNavigation(undefined);
     }, []);
 
-    // Use this for collection/file/trash-only effects; a full pull costs more.
+    // Use incremental sync for automatic collection/file/trash-only effects.
     const remoteFilesPull = useCallback(
-        () =>
-            remoteFilesPullQueue.current.add(() =>
-                pullFiles({
+        (
+            collectionFileSyncMode:
+                | "full"
+                | "incremental"
+                | "bootstrap" = "full",
+        ) =>
+            remoteFilesPullQueue.current.add(async () => {
+                const hydration = localFileHydrationPromiseRef.current;
+                if (hydration) await hydration;
+
+                return pullFiles({
+                    collectionFileSyncMode,
                     onSetCollections: (collections) =>
                         dispatch({ type: "setCollections", collections }),
                     onSetCollectionFiles: (collectionFiles) =>
@@ -809,12 +956,17 @@ const Page: React.FC = () => {
                             type: "setCollectionFiles",
                             collectionFiles,
                         }),
+                    onCollectionFileChange: (change) =>
+                        dispatch({
+                            type: "mergeCollectionFileChange",
+                            ...change,
+                        }),
                     onSetTrashedItems: (trashItems) =>
                         dispatch({ type: "setTrashItems", trashItems }),
                     onDidUpdateCollectionFiles: () =>
                         exportService.onLocalFilesUpdated(),
-                }),
-            ),
+                });
+            }),
         [],
     );
 
@@ -844,9 +996,21 @@ const Page: React.FC = () => {
                 }
 
                 try {
-                    if (!silent) showLoadingBar();
+                    const ownsLoadingBar =
+                        !silent && !isInitialGalleryLoadRef.current;
+                    if (ownsLoadingBar) showLoadingBar();
                     await prePullFiles();
-                    await remoteFilesPull();
+                    const collectionFileSyncMode =
+                        source == "gallery-mount"
+                            ? "bootstrap"
+                            : [
+                                    "gallery-periodic",
+                                    "desktop-focus",
+                                    "watcher-upload",
+                                ].includes(source ?? "")
+                              ? "incremental"
+                              : "full";
+                    await remoteFilesPull(collectionFileSyncMode);
                     await postPullFiles(source);
                 } catch (e) {
                     // A later pull retries transient failures after remote mutations.
@@ -854,7 +1018,8 @@ const Page: React.FC = () => {
                     if (strict) throw e;
                 } finally {
                     dispatch({ type: "clearUnsyncedState" });
-                    if (!silent) hideLoadingBar();
+                    if (!silent && !isInitialGalleryLoadRef.current)
+                        hideLoadingBar();
                 }
             }),
         [
